@@ -35,9 +35,18 @@ const securityHeaders = [
   ...(isDev ? [] : [{ key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" }]),
 ];
 
+/**
+ * VS Code port forwarding (dev tunnels) serves the app at *.devtunnels.ms but rewrites
+ * the browser's Origin header to localhost:3000, which fails the Server Actions CSRF
+ * check (Origin vs x-forwarded-host). Allow both in development only; production keeps
+ * the strict same-origin check.
+ */
+const devTunnelHosts = ["**.devtunnels.ms"];
+
 const nextConfig: NextConfig = {
   // The E2E server builds into its own folder so it can run alongside `next dev`.
   distDir: process.env.NEXT_DIST_DIR || ".next",
+  allowedDevOrigins: devTunnelHosts,
   cacheComponents: true,
   partialPrefetching: true,
   poweredByHeader: false,
@@ -47,6 +56,7 @@ const nextConfig: NextConfig = {
     serverActions: {
       // Proof-of-payment uploads are capped at 4 MB (see src/lib/validation/proof.ts) + multipart overhead.
       bodySizeLimit: "4.2mb",
+      ...(isDev ? { allowedOrigins: ["localhost:3000", ...devTunnelHosts] } : {}),
     },
   },
   serverExternalPackages: ["@react-pdf/renderer"],
