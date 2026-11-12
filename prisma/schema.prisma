@@ -1,0 +1,371 @@
+// CYON Payment Platform — database schema.
+//
+// Every change to this file MUST be recorded as a migration in prisma/migrations/
+// via `npm run db:migrate -- --name <change>`. Never use `prisma db push` and never
+// edit tables from the Supabase dashboard. Applied migrations are never edited.
+//
+// Money is stored as BigInt kobo (₦1 = 100 kobo). Repositories convert to `number`
+// at the boundary (see src/server/infra/prisma/mappers.ts).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum Role {
+  MEMBER
+  FINANCIAL_OFFICER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum FinanceArea {
+  PAYMENTS
+  RATES_CHARGES
+  BROUGHT_FORWARD
+  LINKS_ACCOUNTS
+}
+
+enum MemberStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CategoryGroup {
+  DUES
+  LEVY
+  EVENT
+  DONATION
+}
+
+enum Pricing {
+  FIXED
+  OPEN
+}
+
+enum Frequency {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  ONE_OFF
+}
+
+enum ObligationSource {
+  AUTO
+  MANUAL
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CASH
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  VOIDED
+}
+
+enum BankAccountUsage {
+  GENERAL
+  LINK_ONLY
+}
+
+enum AmountMode {
+  FIXED
+  MINIMUM
+  OPEN
+}
+
+enum LinkStatus {
+  OPEN
+  CLOSED
+}
+
+// ───────────────────────────── Identity & access ─────────────────────────────
+
+model User {
+  id                 String   @id @default(cuid())
+  name               String   @default("")
+  email              String?  @unique
+  phone              String?  @unique // Nigerian local form without country code, e.g. 08012345678
+  passwordHash       String
+  role               Role     @default(MEMBER)
+  isActive           Boolean  @default(true)
+  mustChangePassword Boolean  @default(true)
+  lastLoginAt        DateTime? // set on each successful sign-in
+  memberId           String?  @unique
+  member             Member?  @relation(fields: [memberId], references: [id])
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  sessions      Session[]
+  grants        PermissionGrant[] @relation("GrantHolder")
+  grantsGiven   PermissionGrant[] @relation("GrantGiver")
+  grantsRevoked PermissionGrant[] @relation("GrantRevoker")
+}
+
+/// One row per counted event (failed sign-in, public link submission) for rate limiting.
+/// Keys look like "login:id:<identifier>" or "link:ip:<address>". Old rows are purged daily.
+model RateLimitHit {
+  id        String   @id @default(cuid())
+  key       String
+  createdAt DateTime @default(now())
+
+  @@index([key, createdAt])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique // sha256 of the opaque cookie token
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/// Financial permission granted by a Super Admin to an admin. Rows are never deleted.
+/// A partial unique index (migration) allows only one active grant per (userId, area).
+model PermissionGrant {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation("GrantHolder", fields: [userId], references: [id])
+  area         FinanceArea
+  reason       String
+  grantedById  String
+  grantedBy    User        @relation("GrantGiver", fields: [grantedById], references: [id])
+  grantedAt    DateTime    @default(now())
+  expiresAt    DateTime?
+  revokedAt    DateTime?
+  revokedById  String?
+  revokedBy    User?       @relation("GrantRevoker", fields: [revokedById], references: [id])
+  revokeReason String?
+
+  @@index([userId])
+}
+
+// ───────────────────────────── Members ─────────────────────────────
+
+model Member {
+  id        String       @id @default(cuid())
+  memberNo  String       @unique // CYON-0001
+  fullName  String
+  phone     String // Nigerian local form, e.g. 08012345678
+  email     String?
+  joinedAt  DateTime     @db.Date
+  status    MemberStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user        User?
+  obligations Obligation[]
+  payments    Payment[]
+
+  @@index([phone])
+  @@index([email])
+}
+
+// ───────────────────────────── Categories, rates, charges ─────────────────────────────
+
+model PaymentCategory {
+  id        String        @id @default(cuid())
+  name      String        @unique
+  group     CategoryGroup
+  pricing   Pricing
+  startsOn  DateTime      @db.Date
+  isActive  Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  rates        CategoryRate[]
+  obligations  Obligation[]
+  payments     Payment[]
+  paymentLinks PaymentLink[]
+}
+
+/// Amount and frequency of a FIXED category for one financial year (Jan–Dec).
+model CategoryRate {
+  id          String          @id @default(cuid())
+  categoryId  String
+  category    PaymentCategory @relation(fields: [categoryId], references: [id])
+  year        Int
+  frequency   Frequency
+  amountKobo  BigInt // per period; the full amount for ONE_OFF
+  note        String?
+  setById     String
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([categoryId, year])
+}
+
+/// CYON's fund balance brought forward from the previous year.
+model FinancialYear {
+  id                 String   @id @default(cuid())
+  year               Int      @unique
+  broughtForwardKobo BigInt
+  note               String?
+  recordedById       String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+/// What a member owes for one category and period (e.g. dues for 2026-03, a 2026 levy).
+model Obligation {
+  id          String           @id @default(cuid())
+  memberId    String
+  member      Member           @relation(fields: [memberId], references: [id])
+  categoryId  String
+  category    PaymentCategory  @relation(fields: [categoryId], references: [id])
+  periodKey   String // 2026-03 | 2026-Q1 | 2026 | event slug
+  label       String
+  amountKobo  BigInt
+  source      ObligationSource
+  createdById String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  allocations PaymentAllocation[]
+
+  @@unique([memberId, categoryId, periodKey])
+  @@index([categoryId, periodKey])
+}
+
+// ───────────────────────────── Money in ─────────────────────────────
+
+model BankAccount {
+  id            String           @id @default(cuid())
+  bankName      String
+  accountName   String
+  accountNumber String
+  usage         BankAccountUsage @default(GENERAL)
+  isActive      Boolean          @default(true)
+  sortOrder     Int              @default(0)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  payments     Payment[]
+  paymentLinks PaymentLink[]
+
+  @@unique([bankName, accountNumber])
+}
+
+model PaymentLink {
+  id                String          @id @default(cuid())
+  slug              String          @unique
+  title             String
+  purpose           String
+  categoryId        String
+  category          PaymentCategory @relation(fields: [categoryId], references: [id])
+  bankAccountId     String
+  bankAccount       BankAccount     @relation(fields: [bankAccountId], references: [id])
+  amountMode        AmountMode
+  amountKobo        BigInt? // FIXED: exact amount, MINIMUM: minimum
+  targetKobo        BigInt?
+  closesAt          DateTime?
+  autoCloseOnTarget Boolean         @default(false)
+  status            LinkStatus      @default(OPEN)
+  closedAt          DateTime?
+  createdById       String
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  payments Payment[]
+}
+
+model Payment {
+  id                   String          @id @default(cuid())
+  memberId             String?
+  member               Member?         @relation(fields: [memberId], references: [id])
+  payerName            String
+  payerPhone           String?
+  payerEmail           String?
+  paymentLinkId        String?
+  paymentLink          PaymentLink?    @relation(fields: [paymentLinkId], references: [id])
+  guestAccessTokenHash String?         @unique
+  categoryId           String
+  category             PaymentCategory @relation(fields: [categoryId], references: [id])
+  targetObligationId   String? // member chose a specific period/event to pay
+  amountKobo           BigInt
+  method               PaymentMethod
+  status               PaymentStatus   @default(PENDING)
+  paidOn               DateTime        @db.Date
+  bankAccountId        String?
+  bankAccount          BankAccount?    @relation(fields: [bankAccountId], references: [id])
+  transferReference    String?
+  senderName           String?
+  senderBank           String?
+  proofFileKey         String?
+  proofSha256          String?
+  idempotencyKey       String          @unique
+  recordedById         String?
+  confirmedById        String?
+  confirmedAt          DateTime?
+  rejectionReason      String?
+  voidReason           String?
+  correctsPaymentId    String?         @unique
+  correctsPayment      Payment?        @relation("Correction", fields: [correctsPaymentId], references: [id])
+  correctedBy          Payment?        @relation("Correction")
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  allocations PaymentAllocation[]
+  receipt     Receipt?
+
+  @@index([memberId, status])
+  @@index([categoryId, status])
+  @@index([paymentLinkId, status])
+  @@index([status, paidOn])
+}
+
+model PaymentAllocation {
+  id           String     @id @default(cuid())
+  paymentId    String
+  payment      Payment    @relation(fields: [paymentId], references: [id])
+  obligationId String
+  obligation   Obligation @relation(fields: [obligationId], references: [id])
+  amountKobo   BigInt
+
+  @@unique([paymentId, obligationId])
+  @@index([obligationId])
+}
+
+model Receipt {
+  id        String   @id @default(cuid())
+  receiptNo String   @unique // CYON-2026-000123
+  paymentId String   @unique
+  payment   Payment  @relation(fields: [paymentId], references: [id])
+  issuedAt  DateTime @default(now())
+  snapshot  Json
+}
+
+model ReceiptCounter {
+  year      Int @id
+  lastValue Int @default(0)
+}
+
+// ───────────────────────────── Audit ─────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String? // null = system (cron) or a guest payer
+  action    String
+  entity    String
+  entityId  String
+  before    Json?
+  after     Json?
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}

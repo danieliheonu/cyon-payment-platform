@@ -1,0 +1,10 @@
+{
+  "//": "Used by tsx for command-line scripts: `server-only` guards Next.js bundles only, so it maps to an empty module here (as in Vitest).",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["../src/*"],
+      "server-only": ["../tests/support/empty.ts"]
+    }
+  }
+}

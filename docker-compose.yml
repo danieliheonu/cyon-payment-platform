@@ -1,0 +1,15 @@
+# Local Postgres for development. Run: docker compose up -d
+# Then set DATABASE_URL / DIRECT_URL to postgresql://postgres:postgres@localhost:54329/cyon
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cyon
+    ports:
+      - "54329:5432"
+    volumes:
+      - cyon-db:/var/lib/postgresql/data
+volumes:
+  cyon-db:
