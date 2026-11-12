@@ -20,7 +20,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <head>
         <BotIdClient protect={botProtected} />
       </head>
-      <body className="min-h-full font-sans">{children}</body>
+      {/* Browser extensions (e.g. Grammarly) inject attributes on <body> before hydration. */}
+      <body className="min-h-full font-sans" suppressHydrationWarning>
+        {children}
+      </body>
     </html>
   );
 }
